@@ -29,18 +29,12 @@ function getAdmin() {
 async function enviarEmailResend({ to, subject, html }) {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) throw new Error("RESEND_API_KEY não configurada.");
-
   const from = process.env.EMAIL_FROM || "SGI Renovar <noreply@sgirenovar.com.br>";
-
   const res = await fetch("https://api.resend.com/emails", {
     method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
-    },
+    headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
     body: JSON.stringify({ from, to, subject, html })
   });
-
   const data = await res.json();
   if (!res.ok) throw new Error(data?.message || JSON.stringify(data));
   return data;
@@ -51,59 +45,96 @@ function emailValido(e) {
   return typeof e === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.trim());
 }
 
+/* ── Template de e-mail ── */
+function templateEmail({ titulo, subtitulo, mensagem, link, labelBotao }) {
+  return `
+    <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:32px 24px">
+      <div style="margin-bottom:24px">
+        <span style="font-size:22px;font-weight:bold;color:#1f6340">SGI Renovar</span>
+      </div>
+      <h2 style="color:#0d2218;font-size:20px;margin-bottom:12px">${titulo}</h2>
+      ${subtitulo ? `<p style="color:#3d5e4a;font-size:13px;margin-bottom:8px">${subtitulo}</p>` : ""}
+      <p style="color:#3d5e4a;font-size:15px;line-height:1.7;margin-bottom:24px">${mensagem}</p>
+      <a href="${link}" style="display:inline-block;background:#1f6340;color:#fff;text-decoration:none;padding:14px 28px;border-radius:10px;font-size:15px;font-weight:600">
+        ${labelBotao}
+      </a>
+      <p style="color:#7a9585;font-size:12px;line-height:1.6;margin-top:28px">
+        Este link expira em 24 horas. Se você não solicitou este e-mail, pode ignorá-lo.<br><br>
+        <a href="${link}" style="color:#7a9585;word-break:break-all">${link}</a>
+      </p>
+      <hr style="border:none;border-top:1px solid #d4e7db;margin:24px 0">
+      <p style="color:#7a9585;font-size:11px">SGI Renovar · Sistema de Gestão Integrada</p>
+    </div>
+  `;
+}
+
 /* ══════════════════════════════════════════════
    POST /enviar-reset
-   1. Gera o link de reset via Supabase Admin
-   2. Envia o e-mail pelo Resend diretamente
+   - Se usuário existe no Auth → link recovery
+   - Se não existe → link invite (cria a conta)
 ══════════════════════════════════════════════ */
 app.post("/enviar-reset", async (req, res) => {
   try {
-    const { email, redirectTo } = req.body || {};
+    const { email, nome, redirectTo } = req.body || {};
     if (!emailValido(email)) return res.status(400).json({ ok: false, error: "E-mail inválido." });
 
     const admin    = getAdmin();
     const redirect = redirectTo || process.env.REDIRECT_URL || "https://www.sgirenovar.com.br/login.html";
 
-    /* Gera link de reset com service_role */
-    const { data, error } = await admin.auth.admin.generateLink({
-      type: "recovery",
-      email,
-      options: { redirectTo: redirect }
-    });
+    /* Verifica se usuário existe no Auth */
+    const { data: lista, error: listErr } = await admin.auth.admin.listUsers();
+    if (listErr) throw listErr;
 
-    if (error) throw error;
+    const existeNoAuth = lista?.users?.some(u => u.email === email.trim().toLowerCase());
 
-    const link = data?.properties?.action_link || data?.action_link;
-    if (!link) throw new Error("Link de recuperação não gerado.");
+    let link, tipo;
 
-    /* Envia pelo Resend */
+    if (existeNoAuth) {
+      /* Usuário já tem conta → reset de senha */
+      const { data, error } = await admin.auth.admin.generateLink({
+        type: "recovery",
+        email,
+        options: { redirectTo: redirect }
+      });
+      if (error) throw error;
+      link = data?.properties?.action_link || data?.action_link;
+      tipo = "recovery";
+    } else {
+      /* Usuário ainda não tem conta no Auth → convite */
+      const { data, error } = await admin.auth.admin.generateLink({
+        type: "invite",
+        email,
+        options: { redirectTo: redirect, data: { nome: nome || null } }
+      });
+      if (error) throw error;
+      link = data?.properties?.action_link || data?.action_link;
+      tipo = "invite";
+    }
+
+    if (!link) throw new Error("Link não gerado pelo Supabase.");
+
+    const nomeDisplay = nome ? `, ${nome.split(" ")[0]}` : "";
+
     await enviarEmailResend({
       to: email,
-      subject: "SGI Renovar — Defina sua senha de acesso",
-      html: `
-        <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:32px 24px">
-          <div style="margin-bottom:24px">
-            <span style="font-size:22px;font-weight:bold;color:#1f6340">SGI Renovar</span>
-          </div>
-          <h2 style="color:#0d2218;font-size:20px;margin-bottom:12px">Defina sua senha de acesso</h2>
-          <p style="color:#3d5e4a;font-size:15px;line-height:1.7;margin-bottom:24px">
-            Você foi cadastrado no <strong>SGI Renovar</strong>. Clique no botão abaixo para criar ou redefinir sua senha e acessar o sistema.
-          </p>
-          <a href="${link}" style="display:inline-block;background:#1f6340;color:#fff;text-decoration:none;padding:14px 28px;border-radius:10px;font-size:15px;font-weight:600">
-            Definir minha senha
-          </a>
-          <p style="color:#7a9585;font-size:12px;line-height:1.6;margin-top:28px">
-            Este link expira em 24 horas. Se você não solicitou este e-mail, pode ignorá-lo com segurança.<br><br>
-            <a href="${link}" style="color:#7a9585;word-break:break-all">${link}</a>
-          </p>
-          <hr style="border:none;border-top:1px solid #d4e7db;margin:24px 0">
-          <p style="color:#7a9585;font-size:11px">SGI Renovar · Sistema de Gestão Integrada</p>
-        </div>
-      `
+      subject: tipo === "invite"
+        ? "SGI Renovar — Seu acesso foi criado"
+        : "SGI Renovar — Defina sua senha de acesso",
+      html: templateEmail(tipo === "invite" ? {
+        titulo:     `Bem-vindo${nomeDisplay}!`,
+        mensagem:   `Seu acesso ao <strong>SGI Renovar</strong> foi criado. Clique no botão abaixo para definir sua senha e entrar no sistema.`,
+        link,
+        labelBotao: "Ativar meu acesso"
+      } : {
+        titulo:     "Defina sua senha de acesso",
+        mensagem:   `Clique no botão abaixo para criar ou redefinir sua senha no <strong>SGI Renovar</strong>.`,
+        link,
+        labelBotao: "Definir minha senha"
+      })
     });
 
-    console.log(`[reset] E-mail enviado para ${email}`);
-    return res.json({ ok: true, message: `E-mail enviado para ${email}.` });
+    console.log(`[reset/${tipo}] E-mail enviado para ${email}`);
+    return res.json({ ok: true, message: `E-mail enviado para ${email}.`, tipo });
 
   } catch (e) {
     console.error("[reset] Erro:", e.message);
@@ -113,8 +144,7 @@ app.post("/enviar-reset", async (req, res) => {
 
 /* ══════════════════════════════════════════════
    POST /convidar
-   1. Cria usuário no Auth via inviteUserByEmail
-   2. Envia e-mail de boas-vindas pelo Resend
+   Cria usuário no Auth e envia convite pelo Resend
 ══════════════════════════════════════════════ */
 app.post("/convidar", async (req, res) => {
   try {
@@ -124,13 +154,11 @@ app.post("/convidar", async (req, res) => {
     const admin    = getAdmin();
     const redirect = redirectTo || process.env.REDIRECT_URL || "https://www.sgirenovar.com.br/login.html";
 
-    /* Gera link de convite */
     const { data, error } = await admin.auth.admin.generateLink({
       type: "invite",
       email,
       options: { redirectTo: redirect, data: { nome: nome || null } }
     });
-
     if (error) throw error;
 
     const link = data?.properties?.action_link || data?.action_link;
@@ -138,30 +166,15 @@ app.post("/convidar", async (req, res) => {
 
     const nomeDisplay = nome ? `, ${nome.split(" ")[0]}` : "";
 
-    /* Envia pelo Resend */
     await enviarEmailResend({
       to: email,
       subject: "SGI Renovar — Seu acesso foi criado",
-      html: `
-        <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:32px 24px">
-          <div style="margin-bottom:24px">
-            <span style="font-size:22px;font-weight:bold;color:#1f6340">SGI Renovar</span>
-          </div>
-          <h2 style="color:#0d2218;font-size:20px;margin-bottom:12px">Bem-vindo${nomeDisplay}!</h2>
-          <p style="color:#3d5e4a;font-size:15px;line-height:1.7;margin-bottom:24px">
-            Seu acesso ao <strong>SGI Renovar</strong> foi criado. Clique no botão abaixo para definir sua senha e entrar no sistema.
-          </p>
-          <a href="${link}" style="display:inline-block;background:#1f6340;color:#fff;text-decoration:none;padding:14px 28px;border-radius:10px;font-size:15px;font-weight:600">
-            Ativar meu acesso
-          </a>
-          <p style="color:#7a9585;font-size:12px;line-height:1.6;margin-top:28px">
-            Este link expira em 24 horas.<br><br>
-            <a href="${link}" style="color:#7a9585;word-break:break-all">${link}</a>
-          </p>
-          <hr style="border:none;border-top:1px solid #d4e7db;margin:24px 0">
-          <p style="color:#7a9585;font-size:11px">SGI Renovar · Sistema de Gestão Integrada</p>
-        </div>
-      `
+      html: templateEmail({
+        titulo:     `Bem-vindo${nomeDisplay}!`,
+        mensagem:   `Seu acesso ao <strong>SGI Renovar</strong> foi criado. Clique no botão abaixo para definir sua senha e entrar no sistema.`,
+        link,
+        labelBotao: "Ativar meu acesso"
+      })
     });
 
     console.log(`[convite] E-mail enviado para ${email} (uid: ${data?.user?.id})`);
